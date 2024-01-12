@@ -241,6 +241,21 @@ def simple_normal_vector(source):
         
     return np.array(normal_vector_list);
 
+def viewpoint_process(source,normal,viewpoint,inverse=False):
+    # reference: https://kr.mathworks.com/help/vision/ref/pcnormals.html
+    for i in range(len(source)):
+        p1 = viewpoint - source[i];
+        p2 = normal[i];
+        angle = np.arctan2(np.linalg.norm(np.cross(p1,p2)),np.dot(p1,p2.T));# viewpoint 와 normal vector간 각도 계산
+        if(inverse):
+            if (angle < np.pi/2) and (angle > -np.pi/2):# viewpoint 와 normal vector간 각도가 +-90도 보다 작은
+                normal[i] = -normal[i];# 법선 부호 뒤집기
+        else:
+            if (angle > np.pi/2) or (angle < -np.pi/2):# viewpoint 와 normal vector간 각도가 +-90도 보다 크면
+                normal[i] = -normal[i];# 법선 부호 뒤집기
+    return normal;
+
+
 
 if __name__ == "__main__":
     coord=o3d.geometry.TriangleMesh.create_coordinate_frame();
@@ -250,13 +265,12 @@ if __name__ == "__main__":
     x = r*np.cos(theta);
     y = r*np.sin(theta);
     z = np.zeros_like(x);
-    
+
     #0. generate data 
     target=np.stack([x,y,z],axis=-1);
     source=pcd_rotation(target,45.0,0,0);
     init_source = source.copy();
-    #source = init_source+[0.1,0.1,0.1];
-    source = init_source;
+    source = init_source+[0.1,0.1,0.1];
     pcd_show([source,coord]);
     
     #1. 
@@ -333,3 +347,15 @@ if __name__ == "__main__":
     source_pcd.normals = o3d.utility.Vector3dVector(np.asarray(source_nv));
     pcd_show([source_pcd,coord]);
 
+    #7.
+    cylinder = o3d.geometry.TriangleMesh.create_cylinder()
+    source = np.asarray(cylinder.sample_points_poisson_disk(5000).points);
+    source_nv = estimation_normal_vector(source,radius=0.1,near_sample_num=30);
+    source_nv = viewpoint_process(source,source_nv,np.mean(source,axis=0),True);
+    source_pcd = o3d.geometry.PointCloud()
+    source_pcd.points = o3d.utility.Vector3dVector(np.asarray(source));
+    source_pcd.normals = o3d.utility.Vector3dVector(np.asarray(source_nv));
+    pcd_show([source_pcd,coord]);
+    
+
+    
