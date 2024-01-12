@@ -41,6 +41,7 @@ plt.show()
 
 #3. PCA 작업
 X = centroid_data;
+#Cov_X = (1.0/n)*np.dot(X.T,X);
 Cov_X = (1.0/n)*np.dot(X.T,X);
 U,S,V_T = np.linalg.svd(Cov_X);
 
@@ -69,13 +70,11 @@ ax.set_zlim(-2.0,2.0);
 plt.show()
 
 
-#원형 평면 생성
-theta_sample_num = 100;
-theta = np.arange(0.0,2*np.pi,(2*np.pi/100));
-r = 1.0
-data=np.stack([r*np.cos(theta),r*np.sin(theta),np.zeros_like(theta)],axis=-1);
+#5.45도 기울어진 평면
+np_plate = np.stack([plate_X,plate_Y,plate_Z],axis=-1);
+data = (np_plate + np.random.uniform(-0.1,0.1,np_plate.shape)).reshape((-1,3));
 
-#원형 평면 x축으로 45도 회전
+#평면 x축으로 45도 회전
 R_x = [ [1.0,0.0,0.0],
         [0.0,np.cos(np.deg2rad(45)),-np.sin(np.deg2rad(45))],
         [0.0,np.sin(np.deg2rad(45)),np.cos(np.deg2rad(45))],]
@@ -97,3 +96,10 @@ ax.set_xlim(-2.0,2.0);
 ax.set_ylim(-2.0,2.0);
 ax.set_zlim(-2.0,2.0);
 plt.show()
+
+
+print("Cov_X:",Cov_X)
+print("U :",U)
+print("S :",S)
+print("V_T :",V_T)
+print(np.dot(S.T,S))
