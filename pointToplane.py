@@ -228,10 +228,68 @@ def ICP(source, target, iteration = 10, threshold = 1e-7):
     return Error,final_Tm;
     
 
-def find_approximation_transform_jacobian(sorce, target, target_normal):
+def find_approximation_transform_LS(sorce, target, target_normal):
+    # Non-linear Least-squares based ICP
+
+    num = sorce.shape[0];
+    normal = target_normal;
+
+    A = np.zeros((num,6));
+    b = np.zeros((num,1));
+    diff = target-sorce;
 
 
-    ???
+    for idx in range(num):
+
+        sx = sorce[idx,0]
+        sy = sorce[idx,1]
+        sz = sorce[idx,2]
+
+        tx = target[idx,0]
+        ty = target[idx,1]
+        tz = target[idx,2]
+
+        nx = normal[idx,0]
+        ny = normal[idx,1]
+        nz = normal[idx,2]
+
+        A[idx,0] = (nz * ty) - (ny * tz)
+        A[idx,1] = (nx * tz) - (nz * tx)
+        A[idx,2] = (ny * tx) - (nx * ty)
+        A[idx,3] = nx
+        A[idx,4] = ny
+        A[idx,5] = nz
+
+        for j in range(3):
+            b[idx,0] = b[idx,0] - np.dot(diff[idx,j],normal[idx,j]);
+    
+    A_pinv = np.linalg.pinv(A);
+
+    solve_ = np.dot(A_pinv.T,b);
+
+    Tm = np.eye(4);
+
+    sin_a = np.sin(x[0]);
+    cos_a = np.cos(x[0]);
+    sin_b = np.sin(x[1]);
+    cos_b = np.cos(x[1]);
+    sin_y = np.sin(x[2]);
+    cos_y = np.cos(x[2]);
+
+    Tm[0,0] = cos_y*cos_b;
+    Tm[0,1] = -sin_y*cos_a+cos_y*sin_b*sin_a;
+    Tm[0,2] = sin_y*sin_a+cos_y*sin_b*cos_a;
+    Tm[1,0] = sin_y*cos_b;
+    Tm[1,1] = cos_y*cos_a+sin_y*sin_b*sin_a;
+    Tm[1,2] = -cos_y*sin_a+sin_y*sin_b*cos_a;
+    Tm[2,0] = -sin_b;
+    Tm[2,1] = cos_b*sin_a;
+    Tm[2,2] = cos_b*cos_a;
+
+    #translation vector
+    Tm[0,3] = x[3];
+    Tm[1,3] = x[4];
+    Tm[2,3] = x[5];
 
     return Tm;
 
@@ -260,7 +318,7 @@ def ICP_plane(source, target, target_normal, iteration = 10, threshold = 1e-7):
             break;
 
         # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
-        Tm = find_approximation_transform_jacobian(local_source,target[indices],target_normal);
+        Tm = find_approximation_transform_LS(local_source,target[indices],target_normal);
 
         
         # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
