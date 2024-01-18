@@ -30,7 +30,7 @@ def pcd_rotation(point_cloud,roll_deg=0.0,pitch_deg=0.0,yaw_deg=0.0):
                        ])
     np_point_cloud = point_cloud.reshape((-1,3));
     t_pcd = np.matmul(np_point_cloud,np.matmul(np.matmul(yaw_T,pitch_T),roll_T));
-    print(np.matmul(np.matmul(yaw_T,pitch_T),roll_T) )
+    #print(np.matmul(np.matmul(yaw_T,pitch_T),roll_T) )
     return t_pcd;
 
 def pcd_transform(point_cloud,Tm):
@@ -116,6 +116,118 @@ def find_approximation_transform(sorce, target):
 
     return Tm;
 
+def find_approximation_transform_LS(source, target, init_q = np.array([0,0,0,0,0,0])):
+    #    Least Squares using jacobian
+    
+    #     objective function        =  min Σ|error|
+    #     error (e)                 =  R * source + t - target
+
+    #     Δpoint                    =  Jacobian(θ) * [t_x,t_y,t_z,r_x,r_y,r_z]
+    #     θ                         =  (r_x, r_y, r_z)
+    
+    #     source                    =  source + Δsource
+    #     Δsource                   ≒  error (linear)
+
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  inverse(Jacobian(θ)) * error
+    #     inverse(Jacobian(θ)) is inverse(J), you can calculate the inverse(J) using puedoinverse.
+    #     puedoinverse(J)           =  J_T * inv(J_T * J_T) (<-if J matrix is Full-Rank )
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  [J_T * inv(J_T * J_T)] * [J_T * error]
+    
+    #                |  ∂e      ∂e      ∂e      ∂e     ∂e      ∂e    |
+    #     Jacobian = | ----- , ----- , ----- , ----- ,----- , -----  |
+    #                | ∂t_x    ∂t_y     ∂t_z   ∂r_x   ∂r_y    ∂r_z   |
+    # Partial differentiation
+    #      ∂e     | 1 |      ∂e     | 0 |     ∂e     | 0 |    ∂e     |   ∂R           |    ∂e     |   ∂R           |    ∂e     |   ∂R          |
+    #     ----- = | 0 |     ----- = | 1 |    ----- = | 0 |   ----- = |  ---- * source |   ----- = |  ---- * source |   ----- = |  ---- * source|
+    #     ∂t_x    | 0 | ,   ∂t_y    | 0 | ,  ∂t_z    | 1 | , ∂r_x    |  ∂r_x          | , ∂r_y    |  ∂r_y          | , ∂r_z    |  ∂r_z         |
+
+    
+    
+    # 이동과 회전 초기값 설정
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+
+    # 회전 행렬
+    R = [   [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sx*sz],
+            [sz*cy,         sz*sy*sx + cz*cx,       sz*sy*cx - cz*sx],
+            [-sy,           cy*sx,                  cy*cx]]
+
+    # rx 편미분한 회전 행렬
+    dRx = [ [0,             cz*sy*cx + sz*sx,       -cz*sy*sx + cx*sz],
+            [0,             sz*sy*cx - cz*sx,       -sz*sy*sx - cz*cx],
+            [0,             cy*cx,                  -cy*sx]]
+    
+    # ry 편미분한 회전 행렬
+    dRy = [ [-cz*sy,        cz*cy*sx,               cz*cy*cx],
+            [-sz*sy,        sz*cy*sx,               sz*cy*cx],
+            [-cy,           -sy*sx,                  -sy*cx]]
+    
+    # rz 편미분한 회전 행렬
+    dRz = [ [-sz*cy,        -sz*sy*sx - cz*cx,      -sz*sy*cx + sx*cz],
+            [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sz*sx],
+            [0,             0,                      0]]
+    
+    dRx = np.array(dRx)
+    dRy = np.array(dRy)
+    dRz = np.array(dRz)
+    R  = np.array(R)
+    
+    #Error 계산
+    error = (np.dot(R,source.T)+np.array([[trans_x,trans_y,trans_z]]).T-target.T).T;
+    
+    
+    Hn_list = [];
+    bn_list = [];
+
+    # 자코비안 계산 및 공분산 계산
+    for src_point,error_point in zip(source,error):
+        Jacobin = np.zeros((3,6));
+        Jacobin[:,:3] = np.eye(3);
+        Jacobin[:,3] = np.dot(dRx,src_point).T;
+        Jacobin[:,4] = np.dot(dRy,src_point).T;
+        Jacobin[:,5] = np.dot(dRz,src_point).T;
+
+        Hn = np.dot(Jacobin.T,Jacobin);
+        bn = np.dot(Jacobin.T,error_point);
+
+        Hn_list.append(Hn);
+        bn_list.append(bn);
+
+    H = np.array(Hn_list).sum(axis=0);
+    b = np.array(bn_list).sum(axis=0).reshape((-1,6));
+    
+    # 이동과 회전 변화량 계산
+    solve_q = -np.dot(np.linalg.pinv(H),b.T);
+    
+    # 이동과 회전 변화량만큼 누적 
+    init_q = init_q + (solve_q.T)[0];   
+
+    # 4x4 Transform matrix로 반환
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+    R = [   [cz*cy,         cz*sy*sx-sz*cx,     cz*sy*cx+sx*sz],
+            [sz*cy,         sz*sy*sx+cz*cx,     sz*sy*cx-cz*sx],
+            [-sy,           cy*sx,              cy*cx]];
+    R  = np.array(R)
+    Tm = np.eye(4);
+    Tm[:3,:3] = R[:3,:3]
+    Tm[:3,3] = np.array([[trans_x,trans_y,trans_z]]);
+    return Tm, init_q
+
+
+
 def ICP(source, target, iteration = 10, threshold = 1e-7):
     # 초기 자세(Pose) 정의 
     Tm = np.eye(4);
@@ -153,6 +265,50 @@ def ICP(source, target, iteration = 10, threshold = 1e-7):
     return Error,final_Tm;
     
 
+def ICP_LS(source, target, iteration = 10, threshold = 1e-7):
+    #    Least Squares using jacobian
+    # 초기 자세(Pose) 정의 
+    Tm = np.eye(4);
+    init_q = np.array([0,0,0,0,0,0])
+
+    # 초기 오차
+    Error = 0;
+    
+
+    # 최종 변환 자세
+    final_Tm = Tm.copy();
+
+    # 만약 초기 자세를 알면 아래 코드를 활성화
+    local_source = pcd_transform(source,Tm)
+
+
+    # 반복적(Iterative) 계산
+    for _ in range(iteration):
+        # 가까운 매칭점 계산
+        distances, indices=nearest_neighbor(local_source,target);
+        
+        # 포인트간 평균 거리 계산
+        Error = distances.mean()
+        
+        # 포인트 평균 거리가 한계값보다 작다면 더 이상 찾지 않고 반환
+        if(Error<threshold):
+            break;
+
+        # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
+        Tm,init_q = find_approximation_transform_LS(local_source,target[indices],init_q);
+
+        
+        # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
+        local_source = pcd_transform(local_source, Tm);
+
+        # 근사된 변환행렬 반복적으로 누적하여 정합된 변환 추정
+        final_Tm = np.matmul(Tm,final_Tm);
+
+    return Error,final_Tm;
+    
+
+
+
 
 
 if __name__ == "__main__":
@@ -164,10 +320,9 @@ if __name__ == "__main__":
     y = r*np.sin(theta);
     z = np.zeros_like(x);
 
-    target=np.stack([x,y,z],axis=-1);
-    source=pcd_rotation(target,45.0,0,0);
+    target = np.stack([x,y,z],axis=-1);
+    source = pcd_rotation(target,45.0,0,0)+np.array([0.1,0.1,0.1]);
     init_source = source.copy();
-    
 
     #1 
     pcd_show([source,target,coord])
@@ -208,4 +363,14 @@ if __name__ == "__main__":
     source = pcd_transform(source,Tm);
     pcd_show([source,target,coord])
     print("error: ",error)
+
+    #6
+    source = init_source+[0.1,0.1,0.1];
+    pcd_show([source,target,coord])
+    error, Tm = ICP_LS(source,target,iteration=30);
+    source = pcd_transform(source,Tm);
+    pcd_show([source,target,coord])
+    print("error: ",error)
+
+    
 
