@@ -136,6 +136,7 @@ def find_approximation_transform_LS(source, target, init_q = np.array([0,0,0,0,0
     #                |  ∂e      ∂e      ∂e      ∂e     ∂e      ∂e    |
     #     Jacobian = | ----- , ----- , ----- , ----- ,----- , -----  |
     #                | ∂t_x    ∂t_y     ∂t_z   ∂r_x   ∂r_y    ∂r_z   |
+    
     # Partial differentiation
     #      ∂e     | 1 |      ∂e     | 0 |     ∂e     | 0 |    ∂e     |   ∂R           |    ∂e     |   ∂R           |    ∂e     |   ∂R          |
     #     ----- = | 0 |     ----- = | 1 |    ----- = | 0 |   ----- = |  ---- * source |   ----- = |  ---- * source |   ----- = |  ---- * source|
@@ -328,7 +329,7 @@ if __name__ == "__main__":
     pcd_show([source,target,coord])
 
 
-    #2 
+    #2
     pcd_show([source,target,coord])
     distances,indices=find_near_point(source,target);
     distances2,indices2=nearest_neighbor(source,target);

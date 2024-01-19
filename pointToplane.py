@@ -2,7 +2,7 @@ import numpy as np
 import open3d as o3d
 from sklearn.neighbors import NearestNeighbors
 import transformations as transform
-
+import copy
 
 
 def calculate_fitting_normalvector(source):
@@ -84,7 +84,8 @@ def pcd_show(point_clouds=[]):
             show_list.append(o3d_point_cloud);
         else:
             show_list.append(point_cloud);
-    o3d.visualization.draw_geometries( show_list,point_show_normal=False);
+    
+    o3d.visualization.draw_geometries( show_list,point_show_normal=True);
 
 def pcd_rotation(point_cloud,roll_deg=0.0,pitch_deg=0.0,yaw_deg=0.0):
     roll_T = np.array([[1,0,0],
@@ -188,6 +189,19 @@ def find_approximation_transform(sorce, target):
     return Tm;
 
 
+def viewpoint_process(source,normal,viewpoint,inverse=False):
+    # reference: https://kr.mathworks.com/help/vision/ref/pcnormals.html
+    for i in range(len(source)):
+        p1 = viewpoint - source[i];
+        p2 = normal[i];
+        angle = np.arctan2(np.linalg.norm(np.cross(p1,p2)),np.dot(p1,p2.T));# viewpoint 와 normal vector간 각도 계산
+        if(inverse):
+            if (angle < np.pi/2) and (angle > -np.pi/2):# viewpoint 와 normal vector간 각도가 +-90도 보다 작은
+                normal[i] = -normal[i];# 법선 부호 뒤집기
+        else:
+            if (angle > np.pi/2) or (angle < -np.pi/2):# viewpoint 와 normal vector간 각도가 +-90도 보다 크면
+                normal[i] = -normal[i];# 법선 부호 뒤집기
+    return normal;
 
 
 
@@ -228,72 +242,300 @@ def ICP(source, target, iteration = 10, threshold = 1e-7):
     return Error,final_Tm;
     
 
-def find_approximation_transform_LS(sorce, target, target_normal):
-    # Non-linear Least-squares based ICP
-
-    num = sorce.shape[0];
-    normal = target_normal;
-
-    A = np.zeros((num,6));
-    b = np.zeros((num,1));
-    diff = target-sorce;
-
-
-    for idx in range(num):
-
-        sx = sorce[idx,0]
-        sy = sorce[idx,1]
-        sz = sorce[idx,2]
-
-        tx = target[idx,0]
-        ty = target[idx,1]
-        tz = target[idx,2]
-
-        nx = normal[idx,0]
-        ny = normal[idx,1]
-        nz = normal[idx,2]
-
-        A[idx,0] = (nz * ty) - (ny * tz)
-        A[idx,1] = (nx * tz) - (nz * tx)
-        A[idx,2] = (ny * tx) - (nx * ty)
-        A[idx,3] = nx
-        A[idx,4] = ny
-        A[idx,5] = nz
-
-        for j in range(3):
-            b[idx,0] = b[idx,0] - np.dot(diff[idx,j],normal[idx,j]);
+def find_approximation_transform_LS_plane(source, target,source_normal=None,target_normal=None, init_q = np.array([0,0,0,0,0,0])):
+    #    Least Squares using jacobian
     
-    A_pinv = np.linalg.pinv(A);
+    #     objective function        =  min Σ|error|
+    #     error (e)                 =  normal * (R * source + t - target)
 
-    solve_ = np.dot(A_pinv.T,b);
+    #     Δpoint                    =  Jacobian(θ) * [t_x,t_y,t_z,r_x,r_y,r_z]
+    #     θ                         =  (r_x, r_y, r_z)
+    
+    #     source                    =  source + Δsource
+    #     Δsource                   ≒  error (linear)
 
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  inverse(Jacobian(θ)) * error
+    #     inverse(Jacobian(θ)) is inverse(J), you can calculate the inverse(J) using puedoinverse.
+    #     puedoinverse(J)           =  J_T * inv(J_T * J_T) (<-if J matrix is Full-Rank )
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  [normal * J_T * inv(J_T * J_T)] * [normal * J_T * error]
+    
+    #                |  ∂e      ∂e      ∂e      ∂e     ∂e      ∂e    |
+    #     Jacobian = | ----- , ----- , ----- , ----- ,----- , -----  |
+    #                | ∂t_x    ∂t_y     ∂t_z   ∂r_x   ∂r_y    ∂r_z   |
+    
+    # Partial differentiation
+    #      ∂e     | nx |      ∂e     | 0 |     ∂e     | 0  |    ∂e     |   ∂R           |    ∂e     |   ∂R           |    ∂e     |   ∂R          |
+    #     ----- = | 0  |     ----- = | ny|    ----- = | 0  |   ----- = |  ---- * source |   ----- = |  ---- * source |   ----- = |  ---- * source|
+    #     ∂t_x    | 0  | ,   ∂t_y    | 0 | ,  ∂t_z    | nz | , ∂r_x    |  ∂r_x          | , ∂r_y    |  ∂r_y          | , ∂r_z    |  ∂r_z         |
+
+    if(source_normal is None):
+        source_normal = np.zeros_like(target_normal)
+    
+    weight = 0.5
+    # 이동과 회전 초기값 설정
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+
+    # 회전 행렬
+    R = [   [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sx*sz],
+            [sz*cy,         sz*sy*sx + cz*cx,       sz*sy*cx - cz*sx],
+            [-sy,           cy*sx,                  cy*cx]]
+
+    # rx 편미분한 회전 행렬
+    dRx = [ [0,             cz*sy*cx + sz*sx,       -cz*sy*sx + cx*sz],
+            [0,             sz*sy*cx - cz*sx,       -sz*sy*sx - cz*cx],
+            [0,             cy*cx,                  -cy*sx]]
+    
+    # ry 편미분한 회전 행렬
+    dRy = [ [-cz*sy,        cz*cy*sx,               cz*cy*cx],
+            [-sz*sy,        sz*cy*sx,               sz*cy*cx],
+            [-cy,           -sy*sx,                  -sy*cx]]
+    
+    # rz 편미분한 회전 행렬
+    dRz = [ [-sz*cy,        -sz*sy*sx - cz*cx,      -sz*sy*cx + sx*cz],
+            [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sz*sx],
+            [0,             0,                      0]]
+    
+    dRx = np.array(dRx)
+    dRy = np.array(dRy)
+    dRz = np.array(dRz)
+    R  = np.array(R)
+    
+    #Error 계산
+    error = (np.dot(R,source.T)+np.array([[trans_x,trans_y,trans_z]]).T-target.T).T;
+    
+    
+    Hn_list = [];
+    bn_list = [];
+    
+
+    # 자코비안 계산 및 공분산 계산
+    for src_point,error_point,s_normal_point,t_normal_point in zip(source,error,source_normal,target_normal):
+        Jacobin = np.zeros((3,6));
+        normal_point = (s_normal_point+t_normal_point)
+
+        Jacobin[:,:3]= np.eye(3);
+        Jacobin[:,3] = np.dot(dRx,src_point).T;
+        Jacobin[:,4] = np.dot(dRy,src_point).T;
+        Jacobin[:,5] = np.dot(dRz,src_point).T;
+
+        J   = np.dot(normal_point,Jacobin).reshape((-1,6));
+        e   = np.dot(normal_point,error_point);
+
+        Hn = np.dot(J.T,J);
+        bn = np.dot(J.T,e);
+
+
+        Hn_list.append(Hn);
+        bn_list.append(bn);
+
+    H = np.array(Hn_list).sum(axis=0);
+    b = np.array(bn_list).sum(axis=0).reshape((-1,6));
+    
+
+    # 이동과 회전 변화량 계산
+    solve_q = -np.dot(np.linalg.pinv(H),b.T);
+    
+    
+    # 이동과 회전 변화량만큼 누적 
+    init_q = init_q + weight*(solve_q.T)[0];
+
+    #init_q[3] = np.arctan2(np.sin(init_q[3]), np.cos(init_q[3])) # normalize angle
+    #init_q[4] = np.arctan2(np.sin(init_q[4]), np.cos(init_q[4])) # normalize angle
+    #init_q[5] = np.arctan2(np.sin(init_q[5]), np.cos(init_q[5])) # normalize angle
+
+    # 4x4 Transform matrix로 반환
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+    R = [   [cz*cy,         cz*sy*sx-sz*cx,     cz*sy*cx+sx*sz],
+            [sz*cy,         sz*sy*sx+cz*cx,     sz*sy*cx-cz*sx],
+            [-sy,           cy*sx,              cy*cx]];
+    R  = np.array(R)
     Tm = np.eye(4);
+    Tm[:3,:3] = R[:3,:3]
+    Tm[:3,3] = np.array([[trans_x,trans_y,trans_z]]);
+    return Tm, init_q
 
-    sin_a = np.sin(x[0]);
-    cos_a = np.cos(x[0]);
-    sin_b = np.sin(x[1]);
-    cos_b = np.cos(x[1]);
-    sin_y = np.sin(x[2]);
-    cos_y = np.cos(x[2]);
+def ICP_plane(source, target, iteration = 10, threshold = 1e-7,using_source_normal=False):
+    # 초기 자세(Pose) 정의 
+    Tm = np.eye(4);
+    init_q = np.array([0,0,0,0,0,0])
 
-    Tm[0,0] = cos_y*cos_b;
-    Tm[0,1] = -sin_y*cos_a+cos_y*sin_b*sin_a;
-    Tm[0,2] = sin_y*sin_a+cos_y*sin_b*cos_a;
-    Tm[1,0] = sin_y*cos_b;
-    Tm[1,1] = cos_y*cos_a+sin_y*sin_b*sin_a;
-    Tm[1,2] = -cos_y*sin_a+sin_y*sin_b*cos_a;
-    Tm[2,0] = -sin_b;
-    Tm[2,1] = cos_b*sin_a;
-    Tm[2,2] = cos_b*cos_a;
+    # 초기 오차
+    Error = 0;
 
-    #translation vector
-    Tm[0,3] = x[3];
-    Tm[1,3] = x[4];
-    Tm[2,3] = x[5];
+    # 최종 변환 자세
+    final_Tm = Tm.copy();
 
-    return Tm;
+    # 만약 초기 자세를 알면 아래 코드를 활성화
+    local_source = pcd_transform(source,Tm)
 
-def ICP_plane(source, target, target_normal, iteration = 10, threshold = 1e-7):
+    target_normal = estimation_normal_vector(target,0.1,15);
+    source_normal = estimation_normal_vector(local_source,0.1,15);
+    
+    if(using_source_normal):
+        source_normal = viewpoint_process(local_source,source_normal,np.mean(local_source,axis=0),True);
+    target_normal = viewpoint_process(target,target_normal,np.mean(target,axis=0),True);
+
+    # 반복적(Iterative) 계산
+    for _ in range(iteration):
+        
+        
+        # 가까운 매칭점 계산
+        distances, indices=nearest_neighbor(local_source,target);
+        
+        # 포인트간 평균 거리 계산
+        Error = distances.mean()
+        
+        # 포인트 평균 거리가 한계값보다 작다면 더 이상 찾지 않고 반환
+        if(Error<threshold):
+            break;
+        
+        # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
+        Tm,init_q = find_approximation_transform_LS_plane(source=local_source,
+                                                          target=target[indices],
+                                                          source_normal=source_normal if using_source_normal else None,
+                                                          target_normal=target_normal[indices],
+                                                          init_q=init_q);
+
+        # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
+        local_source = pcd_transform(local_source, Tm);
+        if(using_source_normal):
+            source_normal = pcd_transform(source_normal,Tm);
+
+        # 근사된 변환행렬 반복적으로 누적하여 정합된 변환 추정
+        final_Tm = np.matmul(Tm,final_Tm);
+        #print(Error)
+
+    return Error,final_Tm;
+
+
+def find_approximation_transform_LS(source, target, init_q = np.array([0,0,0,0,0,0])):
+    #    Least Squares using jacobian
+    
+    #     objective function        =  min Σ|error|
+    #     error (e)                 =  R * source + t - target
+
+    #     Δpoint                    =  Jacobian(θ) * [t_x,t_y,t_z,r_x,r_y,r_z]
+    #     θ                         =  (r_x, r_y, r_z)
+    
+    #     source                    =  source + Δsource
+    #     Δsource                   ≒  error (linear)
+
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  inverse(Jacobian(θ)) * error
+    #     inverse(Jacobian(θ)) is inverse(J), you can calculate the inverse(J) using puedoinverse.
+    #     puedoinverse(J)           =  J_T * inv(J_T * J_T) (<-if J matrix is Full-Rank )
+    #     [t_x,t_y,t_z,r_x,r_y,r_z] =  [J_T * inv(J_T * J_T)] * [J_T * error]
+    
+    #                |  ∂e      ∂e      ∂e      ∂e     ∂e      ∂e    |
+    #     Jacobian = | ----- , ----- , ----- , ----- ,----- , -----  |
+    #                | ∂t_x    ∂t_y     ∂t_z   ∂r_x   ∂r_y    ∂r_z   |
+    
+    # Partial differentiation
+    #      ∂e     | 1 |      ∂e     | 0 |     ∂e     | 0 |    ∂e     |   ∂R           |    ∂e     |   ∂R           |    ∂e     |   ∂R          |
+    #     ----- = | 0 |     ----- = | 1 |    ----- = | 0 |   ----- = |  ---- * source |   ----- = |  ---- * source |   ----- = |  ---- * source|
+    #     ∂t_x    | 0 | ,   ∂t_y    | 0 | ,  ∂t_z    | 1 | , ∂r_x    |  ∂r_x          | , ∂r_y    |  ∂r_y          | , ∂r_z    |  ∂r_z         |
+
+    
+    
+    # 이동과 회전 초기값 설정
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+
+    # 회전 행렬
+    R = [   [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sx*sz],
+            [sz*cy,         sz*sy*sx + cz*cx,       sz*sy*cx - cz*sx],
+            [-sy,           cy*sx,                  cy*cx]]
+
+    # rx 편미분한 회전 행렬
+    dRx = [ [0,             cz*sy*cx + sz*sx,       -cz*sy*sx + cx*sz],
+            [0,             sz*sy*cx - cz*sx,       -sz*sy*sx - cz*cx],
+            [0,             cy*cx,                  -cy*sx]]
+    
+    # ry 편미분한 회전 행렬
+    dRy = [ [-cz*sy,        cz*cy*sx,               cz*cy*cx],
+            [-sz*sy,        sz*cy*sx,               sz*cy*cx],
+            [-cy,           -sy*sx,                  -sy*cx]]
+    
+    # rz 편미분한 회전 행렬
+    dRz = [ [-sz*cy,        -sz*sy*sx - cz*cx,      -sz*sy*cx + sx*cz],
+            [cz*cy,         cz*sy*sx - sz*cx,       cz*sy*cx + sz*sx],
+            [0,             0,                      0]]
+    
+    dRx = np.array(dRx)
+    dRy = np.array(dRy)
+    dRz = np.array(dRz)
+    R  = np.array(R)
+    
+    #Error 계산
+    error = (np.dot(R,source.T)+np.array([[trans_x,trans_y,trans_z]]).T-target.T).T;
+    
+    
+    Hn_list = [];
+    bn_list = [];
+
+    # 자코비안 계산 및 공분산 계산
+    for src_point,error_point in zip(source,error):
+        Jacobin = np.zeros((3,6));
+        Jacobin[:,:3] = np.eye(3);
+        Jacobin[:,3] = np.dot(dRx,src_point).T;
+        Jacobin[:,4] = np.dot(dRy,src_point).T;
+        Jacobin[:,5] = np.dot(dRz,src_point).T;
+
+        Hn = np.dot(Jacobin.T,Jacobin);
+        bn = np.dot(Jacobin.T,error_point);
+
+        Hn_list.append(Hn);
+        bn_list.append(bn);
+
+    H = np.array(Hn_list).sum(axis=0);
+    b = np.array(bn_list).sum(axis=0).reshape((-1,6));
+    
+    # 이동과 회전 변화량 계산
+    solve_q = -np.dot(np.linalg.pinv(H),b.T);
+    
+    # 이동과 회전 변화량만큼 누적 
+    init_q = init_q + (solve_q.T)[0];   
+
+    # 4x4 Transform matrix로 반환
+    trans_x,trans_y,trans_z,theta_x,theta_y,theta_z = init_q;
+    sx = np.sin(theta_x);
+    sy = np.sin(theta_y);
+    sz = np.sin(theta_z);
+    cx = np.cos(theta_x);
+    cy = np.cos(theta_y);
+    cz = np.cos(theta_z);
+    R = [   [cz*cy,         cz*sy*sx-sz*cx,     cz*sy*cx+sx*sz],
+            [sz*cy,         sz*sy*sx+cz*cx,     sz*sy*cx-cz*sx],
+            [-sy,           cy*sx,              cy*cx]];
+    R  = np.array(R)
+    Tm = np.eye(4);
+    Tm[:3,:3] = R[:3,:3]
+    Tm[:3,3] = np.array([[trans_x,trans_y,trans_z]]);
+    return Tm, init_q
+
+
+
+def ICP(source, target, iteration = 10, threshold = 1e-7):
     # 초기 자세(Pose) 정의 
     Tm = np.eye(4);
     # 초기 오차
@@ -318,7 +560,7 @@ def ICP_plane(source, target, target_normal, iteration = 10, threshold = 1e-7):
             break;
 
         # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
-        Tm = find_approximation_transform_LS(local_source,target[indices],target_normal);
+        Tm = find_approximation_transform(local_source,target[indices]);
 
         
         # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
@@ -328,36 +570,129 @@ def ICP_plane(source, target, target_normal, iteration = 10, threshold = 1e-7):
         final_Tm = np.matmul(Tm,final_Tm);
 
     return Error,final_Tm;
+    
+
+def ICP_LS(source, target, iteration = 10, threshold = 1e-7):
+    #    Least Squares using jacobian
+    # 초기 자세(Pose) 정의 
+    Tm = np.eye(4);
+    init_q = np.array([0,0,0,0,0,0])
+
+    # 초기 오차
+    Error = 0;
+    
+
+    # 최종 변환 자세
+    final_Tm = Tm.copy();
+
+    # 만약 초기 자세를 알면 아래 코드를 활성화
+    local_source = pcd_transform(source,Tm)
 
 
+    # 반복적(Iterative) 계산
+    for _ in range(iteration):
+        # 가까운 매칭점 계산
+        distances, indices=nearest_neighbor(local_source,target);
+        
+        # 포인트간 평균 거리 계산
+        Error = distances.mean()
+        
+        # 포인트 평균 거리가 한계값보다 작다면 더 이상 찾지 않고 반환
+        if(Error<threshold):
+            break;
+
+        # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
+        Tm,init_q = find_approximation_transform_LS(local_source,target[indices],init_q);
+
+        
+        # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
+        local_source = pcd_transform(local_source, Tm);
+
+        # 근사된 변환행렬 반복적으로 누적하여 정합된 변환 추정
+        final_Tm = np.matmul(Tm,final_Tm);
+
+    return Error,final_Tm;
+    
 if __name__ == "__main__":
-    coord=o3d.geometry.TriangleMesh.create_coordinate_frame();
-    theta_sample_num = 100;
-    theta = np.arange(0.0,2*np.pi,(2*np.pi/100));
-    r = 1.0
-    x = r*np.cos(theta);
-    y = r*np.sin(theta);
-    z = np.zeros_like(x);
 
-    target=np.stack([x,y,z],axis=-1);
-    source=pcd_rotation(target,45.0,0,0);
-    init_source = source.copy();
+    iteration=16
+
+    coord=o3d.geometry.TriangleMesh.create_coordinate_frame(0.1);
+    # 스탠포드버니 생성
+    bunny = o3d.data.BunnyMesh()
+    # source 메쉬 생성
+    s_mesh = o3d.io.read_triangle_mesh(bunny.path)
+    s_mesh.compute_vertex_normals()
     
+    print("===============================================================================")
+    print("Case 1 iteration:",iteration);
+    # Case 1. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
+    R = s_mesh.get_rotation_matrix_from_xyz((np.pi / 2, 0, np.pi / 4));
+
+    # source 포인트클라우드 추출
+    source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
     
-    #4
-    source = init_source+[0.1,0.1,0.1];
-    pcd_show([source,target,coord])
-    error, Tm = ICP(source,target,iteration=30);
-    source = pcd_transform(source,Tm);
-    pcd_show([source,target,coord])
-    print("error: ",error)
+    # target 포인트클라우드는 source로 부터 복사본
+    target = copy.deepcopy(source)
 
-    #5
-    source = init_source+[0.5,0.1,0.1];
-    pcd_show([source,target,coord])
-    target_normal=estimation_normal_vector(target,0.2,15);
-    error, Tm = ICP_plane(source,target,target_normal=target_normal,iteration=30);
+    # source 포인트클라우드를 x방향 90도, z방향 45도 회전
+    Tm = np.eye(4);
+    Tm[:3,:3] = R;
+    Tm[:3,3] = np.array([0.1,0.1,0.1]);
     source = pcd_transform(source,Tm);
-    pcd_show([source,target,coord])
-    print("error: ",error)
 
+    # point to point using SVD method
+    error, Tm = ICP(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#1 point to point SVD Error: ",error);
+
+    # point to point using Least Squares method
+    error, Tm = ICP_LS(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#2 point to point Least Squares Error: ",error);
+
+    # point to plane using Least Squares method
+    error, Tm = ICP_plane(source,target,iteration=iteration,using_source_normal=True);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#3 point to plane Least Squares Error: ",error);
+
+
+    print("===============================================================================")
+    print("Case 2 iteration:",iteration);
+    # Case 2. 같은 모델을 대상 포인트클라우드 다른 샘플링을 가진 경우 (실제)
+    
+    # target 메쉬 복사
+    t_mesh = copy.deepcopy(s_mesh);
+
+    # source 포인트클라우드 추출
+    source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
+
+    # source 포인트클라우드 추출
+    target = np.asarray(t_mesh.sample_points_poisson_disk(5000).points);
+
+    # source 포인트클라우드를 x방향 90도, z방향 45도 회전 0.1
+    Tm = np.eye(4);
+    Tm[:3,:3] = R;
+    Tm[:3,3] = np.array([0.1,0.1,0.1]);
+    source = pcd_transform(source,Tm);
+
+    # point to point using SVD method
+    error, Tm = ICP(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#1 point to point SVD Error: ",error);
+
+    # point to point using Least Squares method
+    error, Tm = ICP_LS(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#2 point to point Least Squares Error: ",error);
+
+    # point to plane using Least Squares method
+    error, Tm = ICP_plane(source,target,iteration=iteration,using_source_normal=True);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#3 point to plane Least Squares Error: ",error);
