@@ -626,7 +626,7 @@ if __name__ == "__main__":
 
     print("===============================================================================")
     print("Case 0 iteration:",iteration);
-    # Case 1. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
+    # Case 0. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
     R = s_mesh.get_rotation_matrix_from_xyz((np.pi / 8, 0, np.pi / 8));
 
     # source 포인트클라우드 추출
