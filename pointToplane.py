@@ -327,7 +327,7 @@ def find_approximation_transform_LS_plane(source, target,source_normal=None,targ
         Jacobin[:,5] = np.dot(dRz,src_point).T;
 
         J   = np.dot(normal_point,Jacobin).reshape((-1,6));
-        e   = np.dot(normal_point,error_point);
+        e   = np.dot(normal_point,error_point*weight);
 
         Hn = np.dot(J.T,J);
         bn = np.dot(J.T,e);
@@ -345,7 +345,7 @@ def find_approximation_transform_LS_plane(source, target,source_normal=None,targ
     
     
     # 이동과 회전 변화량만큼 누적 
-    init_q = init_q + weight*(solve_q.T)[0];
+    init_q = init_q + (solve_q.T)[0];
 
     #init_q[3] = np.arctan2(np.sin(init_q[3]), np.cos(init_q[3])) # normalize angle
     #init_q[4] = np.arctan2(np.sin(init_q[4]), np.cos(init_q[4])) # normalize angle
@@ -615,7 +615,7 @@ def ICP_LS(source, target, iteration = 10, threshold = 1e-7):
     
 if __name__ == "__main__":
 
-    iteration=16
+    iteration=100
 
     coord=o3d.geometry.TriangleMesh.create_coordinate_frame(0.1);
     # 스탠포드버니 생성
@@ -623,7 +623,35 @@ if __name__ == "__main__":
     # source 메쉬 생성
     s_mesh = o3d.io.read_triangle_mesh(bunny.path)
     s_mesh.compute_vertex_normals()
+
+    print("===============================================================================")
+    print("Case 0 iteration:",iteration);
+    # Case 1. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
+    R = s_mesh.get_rotation_matrix_from_xyz((np.pi / 8, 0, np.pi / 8));
+
+    # source 포인트클라우드 추출
+    source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
     
+    # target 포인트클라우드는 source로 부터 복사본
+    target = copy.deepcopy(source)
+
+    # source 포인트클라우드를 x방향 22.5도, z방향 22.5도 회전
+    Tm = np.eye(4);
+    Tm[:3,:3] = R;
+    source = pcd_transform(source,Tm);
+
+    # point to point using SVD method
+    error, Tm = ICP(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#1 point to point SVD Error: ",error);
+
+    # point to point using Least Squares method
+    error, Tm = ICP_LS(source,target,iteration=iteration);
+    tran_source = pcd_transform(source.copy(),Tm);
+    pcd_show([tran_source,target,coord]);
+    print("#2 point to point Least Squares Error: ",error);
+
     print("===============================================================================")
     print("Case 1 iteration:",iteration);
     # Case 1. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
