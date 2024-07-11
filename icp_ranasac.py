@@ -612,6 +612,73 @@ def ICP_LS(source, target, iteration = 10, threshold = 1e-7):
         final_Tm = np.matmul(Tm,final_Tm);
 
     return Error,final_Tm;
+
+
+
+def ICP_LS_RANSAC(source, target, iteration = 10, threshold = 1e-7,ransac_iteration = 30,ransac_random_sample_num=100,ransac_threshold = 0.01):
+    #    Least Squares using jacobian
+    # 초기 자세(Pose) 정의 
+    Tm = np.eye(4);
+    init_q = np.array([0,0,0,0,0,0])
+
+    
+    #RANSAC 변수 정의 및 초기화
+    dataset_length = source.shape[0];# source 길이
+    best_Error = 0;# 최고 피팅 에러
+    best_TM = np.eye(4);# 최고 피팅 모델
+    c_max = 0;# 최대 만족 갯수
+
+    for _ in range(ransac_iteration):
+
+        # 초기 오차
+        Error = 0;
+        
+        # 최종 변환 자세
+        final_Tm = Tm.copy();
+
+        #(RANSAC)랜덤샘플추출
+        local_source = pcd_transform(source.copy(),Tm)
+        random_index = np.random.randint(0, dataset_length, size=ransac_random_sample_num)
+        local_source = local_source[random_index];
+
+
+        # 반복적(Iterative) 계산
+        for _ in range(iteration):
+
+            # 가까운 매칭점 계산
+            distances, indices=nearest_neighbor(local_source,target);
+            
+            # 포인트간 평균 거리 계산
+            Error = distances.mean()
+            
+            # 포인트 평균 거리가 한계값보다 작다면 더 이상 찾지 않고 반환
+            if(Error<threshold):
+                break;
+
+            # 매칭점과 두 포인트클라우드를 이용하여 근사 변환행렬 계산
+            Tm,init_q = find_approximation_transform_LS(local_source,target[indices],init_q);
+
+            # source 포인트클라우드 변환행렬(Tm)을 이용하여 변환
+            local_source = pcd_transform(local_source, Tm);
+
+            # 근사된 변환행렬 반복적으로 누적하여 정합된 변환 추정
+            final_Tm = np.matmul(Tm,final_Tm);
+
+
+        # threshold 보다 작은 error 조건들 추출
+        cond = np.where(distances < ransac_threshold);
+
+        # 조건을 만족하는 갯수
+        c = len(cond[0]);
+
+        # 조건 만족수가 높은 피팅 모델을 선택
+        if(c_max<c):
+            best_TM = final_Tm;
+            best_Error = Error
+            c_max = c;
+
+    return best_Error,best_TM;
+
     
 if __name__ == "__main__":
 
@@ -626,101 +693,36 @@ if __name__ == "__main__":
 
     print("===============================================================================")
     print("Case 0 iteration:",iteration);
-    # Case 0. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
+
     R = s_mesh.get_rotation_matrix_from_xyz((np.pi / 8, 0, np.pi / 8));
-
-    # source 포인트클라우드 추출
-    source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
-    
-    # target 포인트클라우드는 source로 부터 복사본
-    target = copy.deepcopy(source)
-
-    # source 포인트클라우드를 x방향 22.5도, z방향 22.5도 회전
-    Tm = np.eye(4);
-    Tm[:3,:3] = R;
-    source = pcd_transform(source,Tm);
-
-    # point to point using SVD method
-    error, Tm = ICP(source,target,iteration=iteration);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#1 point to point SVD Error: ",error);
-
-    # point to point using Least Squares method
-    error, Tm = ICP_LS(source,target,iteration=iteration);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#2 point to point Least Squares Error: ",error);
-
-    print("===============================================================================")
-    print("Case 1 iteration:",iteration);
-    # Case 1. 같은 모델(bunny)을 대상 두 포인트클라우드가 같은 샘플링을 가진 경우 (이상적)
-    R = s_mesh.get_rotation_matrix_from_xyz((np.pi / 2, 0, np.pi / 4));
-
-    # source 포인트클라우드 추출
-    source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
-    
-    # target 포인트클라우드는 source로 부터 복사본
-    target = copy.deepcopy(source)
-
-    # source 포인트클라우드를 x방향 90도, z방향 45도 회전
-    Tm = np.eye(4);
-    Tm[:3,:3] = R;
-    Tm[:3,3] = np.array([0.1,0.1,0.1]);
-    source = pcd_transform(source,Tm);
-
-    # point to point using SVD method
-    error, Tm = ICP(source,target,iteration=iteration);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#1 point to point SVD Error: ",error);
-
-    # point to point using Least Squares method
-    error, Tm = ICP_LS(source,target,iteration=iteration);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#2 point to point Least Squares Error: ",error);
-    
-    # point to plane using Least Squares method
-    error, Tm = ICP_plane(source,target,iteration=iteration,using_source_normal=False);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#3 point to plane Least Squares Error: ",error);
-
-    
-    print("===============================================================================")
-    print("Case 2 iteration:",iteration);
-    # Case 2. 같은 모델을 대상 포인트클라우드 다른 샘플링을 가진 경우 (실제)
-    
     # target 메쉬 복사
     t_mesh = copy.deepcopy(s_mesh);
 
     # source 포인트클라우드 추출
     source = np.asarray(s_mesh.sample_points_poisson_disk(5000).points);
+    source = np.concatenate([source,np.random.normal(0,0.01,size=(200,3))],axis=0);# 이상치(outlier) 추가
 
     # source 포인트클라우드 추출
     target = np.asarray(t_mesh.sample_points_poisson_disk(5000).points);
 
-    # source 포인트클라우드를 x방향 90도, z방향 45도 회전 0.1
+    # source 포인트클라우드를 x방향 22.5도, z방향 22.5도 회전 0.1
     Tm = np.eye(4);
     Tm[:3,:3] = R;
     Tm[:3,3] = np.array([0.1,0.1,0.1]);
     source = pcd_transform(source,Tm);
 
-    # point to point using SVD method
-    error, Tm = ICP(source,target,iteration=iteration);
-    tran_source = pcd_transform(source.copy(),Tm);
-    pcd_show([tran_source,target,coord]);
-    print("#1 point to point SVD Error: ",error);
-
+    # show source data
+    print("show outlier of source");
+    pcd_show([source,coord]);
+    
     # point to point using Least Squares method
     error, Tm = ICP_LS(source,target,iteration=iteration);
     tran_source = pcd_transform(source.copy(),Tm);
     pcd_show([tran_source,target,coord]);
     print("#2 point to point Least Squares Error: ",error);
 
-    # point to plane using Least Squares method
-    error, Tm = ICP_plane(source,target,iteration=iteration,using_source_normal=False);
+    # point to point using Least Squares + RANSAC method 
+    error, Tm = ICP_LS_RANSAC(source,target,iteration=iteration);
     tran_source = pcd_transform(source.copy(),Tm);
     pcd_show([tran_source,target,coord]);
-    print("#3 point to plane Least Squares Error: ",error);
+    print("#3 point to point Least Squares uing RANSAC Error: ",error);
